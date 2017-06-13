@@ -6,6 +6,9 @@ dependency-reduced-pom.xml
 .settings/
 
 *.iml
+*.ipr
+*.iws
+
 .idea/
 /bin/
 *~
