@@ -18,6 +18,7 @@
  */
 package com.tc.object;
 
+import org.terracotta.entity.EntityUserException;
 import org.terracotta.entity.InvokeFuture;
 import org.terracotta.exception.EntityException;
 

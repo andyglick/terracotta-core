@@ -32,6 +32,7 @@ import com.tc.net.protocol.tcm.TCMessage;
 import com.tc.net.protocol.tcm.TCMessageRouter;
 import com.tc.net.protocol.tcm.TCMessageType;
 import com.tc.net.protocol.transport.ConnectionPolicy;
+import com.tc.net.protocol.transport.DisabledHealthCheckerConfigImpl;
 import com.tc.net.protocol.transport.HealthCheckerConfig;
 import com.tc.net.protocol.transport.ReconnectionRejectedHandler;
 import com.tc.net.protocol.transport.TransportHandshakeErrorHandlerForL1;
@@ -51,9 +52,9 @@ import java.util.Map;
 public class DiagnosticClientBuilder implements ClientBuilder {
   @Override
   public ClientMessageChannel createClientMessageChannel(CommunicationsManager commMgr,
-                                                         SessionProvider sessionProvider, int maxReconnectTries,
+                                                         SessionProvider sessionProvider, 
                                                          int socketConnectTimeout, TCClient client) {
-    return commMgr.createClientChannel(sessionProvider, maxReconnectTries, socketConnectTimeout, false);
+    return commMgr.createClientChannel(ProductID.DIAGNOSTIC, sessionProvider, socketConnectTimeout);
   }
 
   @Override
@@ -63,10 +64,10 @@ public class DiagnosticClientBuilder implements ClientBuilder {
                                                            HealthCheckerConfig aConfig,
                                                            Map<TCMessageType, Class<? extends TCMessage>> messageTypeClassMapping,
                                                            ReconnectionRejectedHandler reconnectionRejectedHandler,
-                                                           TCSecurityManager securityManager, ProductID productId) {
+                                                           TCSecurityManager securityManager) {
     return new CommunicationsManagerImpl(CommunicationsManager.COMMSMGR_CLIENT, monitor, messageRouter, stackHarnessFactory, null,
-                                         connectionPolicy, 0, aConfig, new TransportHandshakeErrorHandlerForL1(), messageTypeClassMapping,
-                                         reconnectionRejectedHandler, securityManager, productId);
+                                         connectionPolicy, 0, new DisabledHealthCheckerConfigImpl() /* ignore health check settings */, new TransportHandshakeErrorHandlerForL1(), messageTypeClassMapping,
+                                         reconnectionRejectedHandler, securityManager);
   }
 
   @Override

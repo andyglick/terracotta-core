@@ -20,17 +20,18 @@ package com.tc.objectserver.persistence;
 
 import com.tc.net.ClientID;
 import com.tc.objectserver.api.ClientNotFoundException;
+import com.tc.text.PrettyPrintable;
+import com.tc.text.PrettyPrinter;
 import com.tc.util.Assert;
 import com.tc.util.sequence.MutableSequence;
 
 import java.io.IOException;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.terracotta.persistence.IPlatformPersistence;
 
 
-public class ClientStatePersistor {
+public class ClientStatePersistor implements PrettyPrintable {
   private static final String CLIENTS_MAP_FILE_NAME =  "clients_map.map";
   private static final String NEXT_CLIENT_ID_FILE_NAME =  "next_client_id.dat";
   
@@ -55,6 +56,7 @@ public class ClientStatePersistor {
     }
     this.clients = clientsMap;
     this.clientIDSequence = new Sequence(this.storageManager);
+    Assert.assertNotNull(this.clients);
   }
 
   public MutableSequence getConnectionIDSequence() {
@@ -69,9 +71,13 @@ public class ClientStatePersistor {
     return clients.containsKey(id);
   }
 
-  public void saveClientState(ClientID channelID) {
-    clients.put(channelID, true);
-    safeStoreClients();
+  public boolean saveClientState(ClientID channelID) {
+    if (clients.put(channelID, true) == null) {
+      safeStoreClients();
+      return true;
+    } else {
+      return false;
+    }
   }
 
   public void deleteClientState(ClientID id) throws ClientNotFoundException {
@@ -79,6 +85,19 @@ public class ClientStatePersistor {
       throw new ClientNotFoundException();
     }
     safeStoreClients();
+  }
+
+  @Override
+  public PrettyPrinter prettyPrint(PrettyPrinter out) {
+    out.indent().println(this.getClass().getName());
+
+    out.indent().indent().println("Connected clients: ");
+    for (ClientID clientID : clients.keySet()) {
+      out.indent().indent().indent().println(clientID);
+    }
+    out.indent().indent().println("Next client id: " + clientIDSequence.current());
+
+    return out;
   }
 
   private void safeStoreClients() {

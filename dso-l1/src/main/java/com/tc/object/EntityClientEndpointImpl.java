@@ -21,6 +21,7 @@ package com.tc.object;
 
 import org.terracotta.entity.EndpointDelegate;
 import org.terracotta.entity.EntityClientEndpoint;
+import org.terracotta.entity.EntityUserException;
 import org.terracotta.entity.InvocationBuilder;
 import org.terracotta.entity.InvokeFuture;
 import org.terracotta.entity.MessageCodec;

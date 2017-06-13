@@ -22,7 +22,6 @@ import com.tc.async.api.StageManager;
 import com.tc.util.ProductID;
 import com.tc.logging.TCLogger;
 import com.tc.management.TCClient;
-import com.tc.net.core.ConnectionInfo;
 import com.tc.net.core.security.TCSecurityManager;
 import com.tc.net.protocol.NetworkStackHarnessFactory;
 import com.tc.net.protocol.tcm.ClientMessageChannel;
@@ -43,17 +42,23 @@ import com.tc.object.session.SessionManager;
 import com.tc.object.session.SessionProvider;
 import com.tc.runtime.logging.LongGCLogger;
 import com.tcclient.cluster.ClusterInternalEventsGun;
-import java.util.Collection;
 
 import java.util.Map;
 
 
 public class StandardClientBuilder implements ClientBuilder {
+  
+  private final boolean isReconnectEnabled;
+
+  public StandardClientBuilder(boolean noreconnect) {
+    this.isReconnectEnabled = !noreconnect;
+  }
+  
   @Override
   public ClientMessageChannel createClientMessageChannel(CommunicationsManager commMgr,
-                                                         SessionProvider sessionProvider, int maxReconnectTries,
+                                                         SessionProvider sessionProvider, 
                                                          int socketConnectTimeout, TCClient client) {
-    return commMgr.createClientChannel(sessionProvider, maxReconnectTries, socketConnectTimeout, true);
+    return commMgr.createClientChannel(isReconnectEnabled ? ProductID.STRIPE : ProductID.SERVER, sessionProvider, socketConnectTimeout);
   }
 
   @Override
@@ -63,10 +68,10 @@ public class StandardClientBuilder implements ClientBuilder {
                                                            HealthCheckerConfig aConfig,
                                                            Map<TCMessageType, Class<? extends TCMessage>> messageTypeClassMapping,
                                                            ReconnectionRejectedHandler reconnectionRejectedHandler,
-                                                           TCSecurityManager securityManager, ProductID productId) {
+                                                           TCSecurityManager securityManager) {
     return new CommunicationsManagerImpl(CommunicationsManager.COMMSMGR_CLIENT, monitor, messageRouter, stackHarnessFactory, null,
                                          connectionPolicy, 0, aConfig, new TransportHandshakeErrorHandlerForL1(), messageTypeClassMapping,
-                                         reconnectionRejectedHandler, securityManager, productId);
+                                         reconnectionRejectedHandler, securityManager);
   }
 
   @Override

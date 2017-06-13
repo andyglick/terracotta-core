@@ -41,7 +41,7 @@ public class StageImpl<EC> implements Stage<EC> {
                                                 // stage
   private final String         name;
   private final EventHandler<EC> handler;
-  private final StageQueueImpl<EC> stageQueue;
+  private final StageQueue<EC> stageQueue;
   private final WorkerThread<EC>[] threads;
   private final ThreadGroup    group;
   private final TCLogger       logger;
@@ -69,7 +69,7 @@ public class StageImpl<EC> implements Stage<EC> {
     this.name = name;
     this.handler = handler;
     this.threads = new WorkerThread[queueCount];
-    this.stageQueue = new StageQueueImpl<EC>(queueCount, queueFactory, loggerProvider, name, queueSize);
+    this.stageQueue = StageQueue.FACTORY.factory(queueCount, queueFactory, loggerProvider, name, queueSize);
     this.group = group;
     this.sleepMs = TCPropertiesImpl.getProperties().getInt("seda." + name + ".sleepMs", 0);
     if (this.sleepMs > 0) {
@@ -83,7 +83,12 @@ public class StageImpl<EC> implements Stage<EC> {
 
   @Override
   public void destroy() {
-    shutdown = true;
+    synchronized (this) {
+      if (shutdown) {
+        return;
+      }
+      shutdown = true;
+    }
     stageQueue.setClosed(true);
     stopThreads();
     handler.destroy();
@@ -91,10 +96,12 @@ public class StageImpl<EC> implements Stage<EC> {
 
   @Override
   public void start(ConfigurationContext context) {
-    if (!shutdown) {
-      return;
+    synchronized (this) {
+      if (!shutdown) {
+        return;
+      }
+      shutdown = false;
     }
-    shutdown = false;
     stageQueue.setClosed(false);
     handler.initializeContext(context);
     startThreads();
@@ -129,7 +136,7 @@ public class StageImpl<EC> implements Stage<EC> {
     }
   }
 
-  private void stopThreads() {
+  private synchronized void stopThreads() {
     for (WorkerThread<EC> thread : threads) {
       thread.interrupt();
       try {

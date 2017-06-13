@@ -75,7 +75,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.terracotta.exception.EntityNotFoundException;
-import org.terracotta.exception.EntityUserException;
+import org.terracotta.exception.EntityServerUncaughtException;
 
 
 public class ClientEntityManagerImpl implements ClientEntityManager {
@@ -93,6 +93,7 @@ public class ClientEntityManagerImpl implements ClientEntityManager {
   private final StageManager stages;
   
   private boolean isShutdown = false;
+  private final boolean reconnectable;
 
 //  for testing
   private boolean wasBusy = false;
@@ -110,6 +111,8 @@ public class ClientEntityManagerImpl implements ClientEntityManager {
     this.stages = mgr;
     
     this.outbound = createSendStage();
+    
+    this.reconnectable = channel.getProductId().isReconnectEnabled();
   }
   
   public boolean checkBusy() {
@@ -524,12 +527,12 @@ public class ClientEntityManagerImpl implements ClientEntityManager {
         try {
           TimeUnit.SECONDS.sleep(2);
         } catch (InterruptedException in) {
-          throw new EntityUserException(eid.getClassName(), eid.getEntityName(), in);
+          throw new VoltronWrapperException(new EntityServerUncaughtException(eid.getClassName(), eid.getEntityName(), "", in));
         }
         logger.info("Operation delayed:" + msg.getVoltronType() + ", busy wait");
         msg = createMessageWithDescriptor(msg.getEntityDescriptor(), msg.doesRequireReplication(), msg.getExtendedData(), msg.getVoltronType(), requestedAcks);
       } catch (InterruptedException ie) {
-        throw new EntityUserException(eid.getClassName(), eid.getEntityName(), ie);
+        throw new VoltronWrapperException(new EntityServerUncaughtException(eid.getClassName(), eid.getEntityName(), "", ie));
       }
     }
   }
@@ -569,10 +572,13 @@ public class ClientEntityManagerImpl implements ClientEntityManager {
     TransactionID transactionID = new TransactionID(currentTransactionID.incrementAndGet());
     // Figure out the "trailing edge" of the current progress through the transaction stream.
     TransactionID oldestTransactionPending = transactionID;
-    for (TransactionID pendingID : this.inFlightMessages.keySet()) {
-      if (oldestTransactionPending.compareTo(pendingID) > 0) {
-        // peindingID is earlier than oldestTransactionPending.
-        oldestTransactionPending = pendingID;
+    // if reconnectable, discover the oldest transaction still being waited for
+    if (reconnectable) {
+      for (TransactionID pendingID : this.inFlightMessages.keySet()) {
+        if (oldestTransactionPending.compareTo(pendingID) > 0) {
+          // pendingID is earlier than oldestTransactionPending.
+          oldestTransactionPending = pendingID;
+        }
       }
     }
     // Create the message and populate it.

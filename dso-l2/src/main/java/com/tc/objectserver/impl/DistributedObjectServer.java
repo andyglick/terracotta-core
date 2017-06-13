@@ -29,6 +29,7 @@ import com.tc.services.SingleThreadedTimer;
 
 import org.terracotta.entity.PlatformConfiguration;
 import org.terracotta.entity.ServiceConfiguration;
+import org.terracotta.entity.ServiceException;
 import org.terracotta.entity.ServiceRegistry;
 import org.terracotta.monitoring.IMonitoringProducer;
 import org.terracotta.monitoring.PlatformServer;
@@ -163,8 +164,6 @@ import com.tc.object.msg.LockRequestMessage;
 import com.tc.object.net.DSOChannelManager;
 import com.tc.object.net.DSOChannelManagerImpl;
 import com.tc.object.net.DSOChannelManagerMBean;
-import com.tc.object.session.NullSessionManager;
-import com.tc.object.session.SessionManager;
 import com.tc.objectserver.api.ServerEntityAction;
 import com.tc.objectserver.core.api.GlobalServerStatsImpl;
 import com.tc.objectserver.core.api.ServerConfigurationContext;
@@ -191,8 +190,6 @@ import com.tc.properties.ReconnectConfig;
 import com.tc.properties.TCProperties;
 import com.tc.properties.TCPropertiesConsts;
 import com.tc.properties.TCPropertiesImpl;
-import com.tc.runtime.TCMemoryManagerImpl;
-import com.tc.runtime.logging.LongGCLogger;
 import com.tc.server.ServerConnectionValidator;
 import com.tc.server.TCServer;
 import com.tc.server.TCServerMain;
@@ -247,6 +244,7 @@ import com.tc.operatorevent.TerracottaOperatorEvent;
 import com.tc.operatorevent.TerracottaOperatorEventCallback;
 import com.tc.text.PrettyPrinter;
 import com.tc.text.PrettyPrinterImpl;
+import com.tc.util.ProductID;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
@@ -254,6 +252,7 @@ import java.io.Writer;
 import java.lang.management.ManagementFactory;
 import java.net.BindException;
 import java.nio.charset.Charset;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.terracotta.config.TcConfiguration;
@@ -301,8 +300,6 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
 
   private final CallbackDumpHandler              dumpHandler      = new CallbackDumpHandler();
 
-  protected final TCSecurityManager              tcSecurityManager;
-
   private final SingleThreadedTimer timer;
   private final TerracottaServiceProviderRegistryImpl serviceRegistry;
   private WeightGeneratorFactory globalWeightGeneratorFactory;
@@ -311,24 +308,18 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
   // used by a test
   public DistributedObjectServer(L2ConfigurationSetupManager configSetupManager, TCThreadGroup threadGroup,
                                  ConnectionPolicy connectionPolicy, TCServerInfoMBean tcServerInfoMBean) {
-    this(configSetupManager, threadGroup, connectionPolicy, new SEDA<HttpConnectionContext>(threadGroup), null, null);
+    this(configSetupManager, threadGroup, connectionPolicy, new SEDA<HttpConnectionContext>(threadGroup), null);
 
   }
 
   public DistributedObjectServer(L2ConfigurationSetupManager configSetupManager, TCThreadGroup threadGroup,
                                  ConnectionPolicy connectionPolicy,
                                  SEDA<HttpConnectionContext> seda,
-                                 TCServer server, TCSecurityManager securityManager) {
+                                 TCServer server) {
     // This assertion is here because we want to assume that all threads spawned by the server (including any created in
     // 3rd party libs) inherit their thread group from the current thread . Consider this before removing the assertion.
     // Even in tests, we probably don't want different thread group configurations
     Assert.assertEquals(threadGroup, Thread.currentThread().getThreadGroup());
-
-    this.tcSecurityManager = securityManager;
-    if (configSetupManager.isSecure()) {
-      Assert.assertNotNull("Security is turned on, but TCSecurityManager", this.tcSecurityManager);
-      consoleLogger.info("Security enabled, turning on SSL");
-    }
 
     this.configSetupManager = configSetupManager;
     this.haConfig = new HaConfigImpl(this.configSetupManager);
@@ -344,7 +335,7 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
 
   protected ServerBuilder createServerBuilder(HaConfig config, TCLogger tcLogger, TCServer server,
                                                  L2Config l2dsoConfig) {
-    return new StandardServerBuilder(config, tcLogger, tcSecurityManager);
+    return new StandardServerBuilder(config, tcLogger);
   }
 
   protected ServerBuilder getServerBuilder() {
@@ -456,7 +447,6 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
 
     final int maxStageSize = TCPropertiesImpl.getProperties().getInt(TCPropertiesConsts.L2_SEDA_STAGE_SINK_CAPACITY);
     final StageManager stageManager = this.seda.getStageManager();
-    final SessionManager sessionManager = new NullSessionManager();
 
     this.dumpHandler.registerForDump(new CallbackDumpAdapter(stageManager));
 
@@ -553,6 +543,9 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
     final MessageMonitor mm = MessageMonitorImpl.createMonitor(TCPropertiesImpl.getProperties(), logger);
 
     final TCMessageRouter messageRouter = new TCMessageRouterImpl();
+    
+    TCSecurityManager mgr = new PluggableSecurityManager(this.serviceRegistry.subRegistry(platformConsumerID));
+    
     this.communicationsManager = new CommunicationsManagerImpl(CommunicationsManager.COMMSMGR_SERVER, mm,
                                                                messageRouter, networkStackHarnessFactory,
                                                                this.connectionPolicy, commWorkerThreadCount,
@@ -561,22 +554,14 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
                                                                this.thisServerNodeID,
                                                                new TransportHandshakeErrorNullHandler(),
                                                                getMessageTypeClassMappings(), Collections.emptyMap(),
-                                                               tcSecurityManager);
+                                                               mgr);
 
 
     final SampledCumulativeCounterConfig sampledCumulativeCounterConfig = new SampledCumulativeCounterConfig(1, 300,
                                                                                                              true, 0L);
 
-    final TCMemoryManagerImpl tcMemManager = new TCMemoryManagerImpl(this.threadGroup);
-    final long timeOut = TCPropertiesImpl.getProperties().getLong(TCPropertiesConsts.LOGGING_LONG_GC_THRESHOLD);
-    final LongGCLogger gcLogger = this.serverBuilder.createLongGCLogger(timeOut);
-
-    tcMemManager.registerForMemoryEvents(gcLogger);
-    // CDV-1181 warn if using CMS
-    tcMemManager.checkGarbageCollectors();
-
     ClientStatePersistor clientStateStore = this.persistor.getClientStatePersistor();
-    this.connectionIdFactory = new ConnectionIDFactoryImpl(clientStateStore);
+    this.connectionIdFactory = new ConnectionIDFactoryImpl(clientStateStore, EnumSet.allOf(ProductID.class));
 
     final String dsoBind = l2DSOConfig.tsaPort().getBind();
     this.l1Listener = this.communicationsManager.createListener(new TCSocketAddress(dsoBind, serverPort), true,
@@ -670,12 +655,17 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
         .createCounter(sampledCumulativeCounterConfig);
 
     // Note that the monitoring service interface can be null if there is no monitoring support loaded into the server.
-    IMonitoringProducer serviceInterface = platformServiceRegistry.getService(new ServiceConfiguration<IMonitoringProducer>(){
-      @Override
-      public Class<IMonitoringProducer> getServiceType() {
-        return IMonitoringProducer.class;
-      }});
-    
+    IMonitoringProducer serviceInterface = null;
+    try {
+      serviceInterface = platformServiceRegistry.getService(new ServiceConfiguration<IMonitoringProducer>(){
+        @Override
+        public Class<IMonitoringProducer> getServiceType() {
+          return IMonitoringProducer.class;
+        }});
+    } catch (ServiceException e) {
+      Assert.fail("Multiple IMonitoringProducer implementations found!");
+    }
+
     long reconnectTimeout = l2DSOConfig.clientReconnectWindow();
     logger.debug("Client Reconnect Window: " + reconnectTimeout + " seconds");
     reconnectTimeout *= 1000;
@@ -702,7 +692,7 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
 
     entityManager = new EntityManagerImpl(this.serviceRegistry, clientEntityStateManager, eventCollector, processor, this::flushLocalPipeline);
     // We need to set up a stage to point at the ProcessTransactionHandler and we also need to register it for events, below.
-    final ProcessTransactionHandler processTransactionHandler = new ProcessTransactionHandler(this.persistor.getEntityPersistor(), this.persistor.getTransactionOrderPersistor(), channelManager, entityManager, () -> l2Coordinator.getStateManager().cleanupKnownServers());
+    final ProcessTransactionHandler processTransactionHandler = new ProcessTransactionHandler(this.persistor, channelManager, entityManager, () -> l2Coordinator.getStateManager().cleanupKnownServers());
     final Stage<VoltronEntityMessage> processTransactionStage_voltron = stageManager.createStage(ServerConfigurationContext.VOLTRON_MESSAGE_STAGE, VoltronEntityMessage.class, processTransactionHandler.getVoltronMessageHandler(), 1, maxStageSize);
     final Stage<TCMessage> multiRespond = stageManager.createStage(ServerConfigurationContext.RESPOND_TO_REQUEST_STAGE, TCMessage.class, processTransactionHandler.getMultiResponseSender(), 1, maxStageSize);
     final Sink<VoltronEntityMessage> voltronMessageSink = processTransactionStage_voltron.getSink();
@@ -732,7 +722,7 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
 
     this.groupCommManager = this.serverBuilder.createGroupCommManager(this.configSetupManager, stageManager,
                                                                       this.thisServerNodeID,
-                                                                      this.stripeIDStateManager, this.globalWeightGeneratorFactory);
+                                                                      this.stripeIDStateManager, mgr, this.globalWeightGeneratorFactory);
 
     this.dumpHandler.registerForDump(new CallbackDumpAdapter(this.groupCommManager));
 
@@ -747,7 +737,7 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
     
     state.registerForStateChangeEvents(this.server);
 //  routing for passive to receive replication    
-    ReplicatedTransactionHandler replicatedTransactionHandler = new ReplicatedTransactionHandler(state, this.persistor.getTransactionOrderPersistor(), entityManager, this.persistor.getEntityPersistor(), groupCommManager);
+    ReplicatedTransactionHandler replicatedTransactionHandler = new ReplicatedTransactionHandler(state, this.persistor, entityManager, groupCommManager);
     // This requires both the stage for handling the replication/sync messages.
     Stage<ReplicationMessage> replicationStage = stageManager.createStage(ServerConfigurationContext.PASSIVE_REPLICATION_STAGE, ReplicationMessage.class, 
         replicatedTransactionHandler.getEventHandler(), 1, maxStageSize);
@@ -861,8 +851,7 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
     });
 
     // XXX: yucky casts
-    this.managementContext = new ServerManagementContext(
-        this.lockManager, (DSOChannelManagerMBean) channelManager,
+    this.managementContext = new ServerManagementContext((DSOChannelManagerMBean) channelManager,
                                                          serverStats, channelStats, instanceMonitor,
                                                          connectionPolicy,
                                                          remoteManagement);
@@ -1005,7 +994,7 @@ public class DistributedObjectServer implements TCDumper, LockInfoDumpHandler, S
       public void l2StateChanged(StateChangedEvent sce) {
         rcs.setCurrentState(sce.getCurrentState());
         final Set<ClientID> existingConnections = Collections.unmodifiableSet(persistor.getClientStatePersistor().loadClientIDs());
-        persistor.getEntityPersistor().removeOrphanedClientsFromJournal(existingConnections);
+//        persistor.getEntityPersistor().removeOrphanedClientsFromJournal(existingConnections);
         if (sce.movedToActive()) {
           startActiveMode(sce.getOldState().equals(StateManager.PASSIVE_STANDBY));
           try {

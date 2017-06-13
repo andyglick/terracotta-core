@@ -144,18 +144,18 @@ public class TerracottaServiceProviderRegistryImpl implements TerracottaServiceP
   @Override
   public void dumpStateTo(StateDumper stateDumper) {
     for (ServiceProvider serviceProvider : serviceProviders) {
-      // ServiceProviders can optionally implement StateDumpable, so we do a instanceof check before calling dump state
-      // method
-      if(serviceProvider instanceof StateDumpable) {
-        ((StateDumpable) serviceProvider).dumpStateTo(stateDumper.subStateDumper(serviceProvider.getClass().getName()));
+      try {
+        serviceProvider.dumpStateTo(stateDumper.subStateDumper(serviceProvider.getClass().getName()));
+      } catch (Throwable t) {
+        stateDumper.subStateDumper(serviceProvider.getClass().getName()).dumpState("exception", t.getMessage());
       }
     }
 
     for (ImplementationProvidedServiceProvider implementationProvidedServiceProvider : implementationProvidedServiceProviders) {
-      // ServiceProviders can optionally implement StateDumpable, so we do a instanceof check before calling dump state
-      // method
-      if(implementationProvidedServiceProvider instanceof StateDumpable) {
-        ((StateDumpable) implementationProvidedServiceProvider).dumpStateTo(stateDumper.subStateDumper(implementationProvidedServiceProvider.getClass().getName()));
+      try {
+        implementationProvidedServiceProvider.dumpStateTo(stateDumper.subStateDumper(implementationProvidedServiceProvider.getClass().getName()));
+      } catch (Throwable t) {
+        stateDumper.subStateDumper(implementationProvidedServiceProvider.getClass().getName()).dumpState("exception", t.getMessage());
       }
     }
   }
@@ -181,4 +181,5 @@ public class TerracottaServiceProviderRegistryImpl implements TerracottaServiceP
     out.println(dump);
     return out;
   }
+
 }

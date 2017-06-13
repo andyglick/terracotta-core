@@ -19,7 +19,6 @@
 package com.tc.object;
 
 import com.tc.async.api.StageManager;
-import com.tc.util.ProductID;
 import com.tc.logging.TCLogger;
 import com.tc.management.TCClient;
 import com.tc.net.core.security.TCSecurityManager;
@@ -45,7 +44,7 @@ import java.util.Map;
 
 public interface ClientBuilder {
   ClientMessageChannel createClientMessageChannel(CommunicationsManager commMgr,
-                                                     SessionProvider sessionProvider, int maxReconnectTries,
+                                                     SessionProvider sessionProvider,
                                                      int socketConnectTimeout, TCClient client);
 
   CommunicationsManager createCommunicationsManager(MessageMonitor monitor,
@@ -56,7 +55,7 @@ public interface ClientBuilder {
                                                     HealthCheckerConfig hcConfig,
                                                     Map<TCMessageType, Class<? extends TCMessage>> messageTypeClassMapping,
                                                     ReconnectionRejectedHandler reconnectionRejectedBehaviour,
-                                                    TCSecurityManager securityManager, ProductID productId);
+                                                    TCSecurityManager securityManager);
 
   ClientHandshakeManager createClientHandshakeManager(TCLogger logger,
                                                       ClientHandshakeMessageFactory chmf,

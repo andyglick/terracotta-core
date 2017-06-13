@@ -18,6 +18,7 @@
  */
 package com.tc.object;
 
+import org.terracotta.entity.EntityUserException;
 import org.terracotta.exception.EntityException;
 
 import com.tc.entity.NetworkVoltronEntityMessage;

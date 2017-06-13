@@ -20,23 +20,12 @@ package com.tc.objectserver.entity;
 
 import com.tc.async.api.Sink;
 import com.tc.net.ClientID;
-import org.junit.Before;
-import org.junit.Test;
-import org.terracotta.entity.ClientDescriptor;
-import org.terracotta.entity.ActiveServerEntity;
-import org.terracotta.entity.EntityMessage;
-import org.terracotta.entity.MessageCodecException;
-import org.terracotta.entity.PassiveServerEntity;
-import org.terracotta.entity.EntityServerService;
-import org.terracotta.entity.ServiceRegistry;
-import org.terracotta.entity.SyncMessageCodec;
-import org.terracotta.exception.EntityAlreadyExistsException;
-import org.terracotta.exception.EntityUserException;
-
 import com.tc.object.ClientInstanceID;
 import com.tc.object.EntityID;
 import com.tc.object.FetchID;
 import com.tc.object.tx.TransactionID;
+import com.tc.objectserver.api.ManagedEntity;
+import com.tc.objectserver.api.ManagementKeyCallback;
 import com.tc.objectserver.api.ServerEntityAction;
 import com.tc.objectserver.api.ServerEntityRequest;
 import com.tc.objectserver.api.ServerEntityResponse;
@@ -46,6 +35,30 @@ import com.tc.objectserver.entity.RequestProcessor.EntityRequest;
 import com.tc.objectserver.testentity.TestEntity;
 import com.tc.services.InternalServiceRegistry;
 import com.tc.util.Assert;
+import org.junit.AfterClass;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Matchers;
+import org.mockito.Mockito;
+import org.mockito.invocation.InvocationOnMock;
+import org.terracotta.entity.ActiveServerEntity;
+import org.terracotta.entity.ClientDescriptor;
+import org.terracotta.entity.CommonServerEntity;
+import org.terracotta.entity.ConcurrencyStrategy;
+import org.terracotta.entity.ConfigurationException;
+import org.terracotta.entity.EntityMessage;
+import org.terracotta.entity.EntityResponse;
+import org.terracotta.entity.EntityServerService;
+import org.terracotta.entity.EntityUserException;
+import org.terracotta.entity.ExecutionStrategy;
+import org.terracotta.entity.MessageCodec;
+import org.terracotta.entity.MessageCodecException;
+import org.terracotta.entity.PassiveServerEntity;
+import org.terracotta.entity.ServiceRegistry;
+import org.terracotta.entity.SyncMessageCodec;
+import org.terracotta.exception.EntityAlreadyExistsException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -61,14 +74,9 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Matchers;
 
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.eq;
-import org.mockito.Mockito;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -76,16 +84,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import org.mockito.invocation.InvocationOnMock;
-import org.terracotta.entity.CommonServerEntity;
-import org.terracotta.entity.ConcurrencyStrategy;
-import org.terracotta.entity.ConfigurationException;
-import org.terracotta.entity.EntityResponse;
-import org.terracotta.entity.ExecutionStrategy;
-import org.terracotta.entity.MessageCodec;
-
-import com.tc.objectserver.api.ManagedEntity;
-import com.tc.objectserver.api.ManagementKeyCallback;
 
 
 public class ManagedEntityImplTest {
@@ -107,6 +105,7 @@ public class ManagedEntityImplTest {
   private ClientDescriptor clientDescriptor;
   private static ExecutorService exec;
   private static ExecutorService pth;
+  private InvokeContextImpl invokeContext;
 
   @BeforeClass
   public static void setupClass() {
@@ -163,6 +162,7 @@ public class ManagedEntityImplTest {
     boolean isInActiveState = false;
     managedEntity = new ManagedEntityImpl(entityID, version, consumerID, loopback, serviceRegistry, clientEntityStateManager, eventCollector, requestMulti, serverEntityService, isInActiveState, true);
     clientDescriptor = new ClientDescriptorImpl(nodeID, clientInstanceID);
+    invokeContext=new InvokeContextImpl(clientDescriptor, 1, 1);
     invokeOnTransactionHandler(()->Thread.currentThread().setName(ServerConfigurationContext.PASSIVE_REPLICATION_STAGE));
   }
   
@@ -289,7 +289,7 @@ public class ManagedEntityImplTest {
     TestingResponse piResp = mockResponse();
     invokeOnTransactionHandler(()->managedEntity.addRequestMessage(passiveInvoke, loc, null, piResp::complete, piResp::failure));
     piResp.waitFor();
-    verify(passiveServerEntity).invoke(any(EntityMessage.class));
+    verify(passiveServerEntity).invokePassive(eq(invokeContext), any(EntityMessage.class));
     
     promote();
 
@@ -299,14 +299,14 @@ public class ManagedEntityImplTest {
     TestingResponse anoResp = mockResponse();
     invokeOnTransactionHandler(()->managedEntity.addRequestMessage(activeNoop, anoLoc, null, anoResp::complete, anoResp::failure));
     anoResp.waitFor();
-    verify(activeServerEntity, Mockito.never()).invoke(eq(clientDescriptor), any(EntityMessage.class));
+    verify(activeServerEntity, Mockito.never()).invokeActive(eq(invokeContext), any(EntityMessage.class));
     
     ServerEntityRequest active = mockExecutionInvokeRequest(ExecutionStrategy.Location.ACTIVE);
     MessagePayload activeLoc = mockLocationPayload(ExecutionStrategy.Location.ACTIVE);
     TestingResponse aResp = mockResponse();
     invokeOnTransactionHandler(()->managedEntity.addRequestMessage(active, activeLoc, null, aResp::complete, aResp::failure));
     aResp.waitFor();
-    verify(activeServerEntity).invoke(eq(clientDescriptor), any(EntityMessage.class));
+    verify(activeServerEntity).invokeActive(eq(invokeContext), any(EntityMessage.class));
   }  
 
   @Test
@@ -473,11 +473,13 @@ public class ManagedEntityImplTest {
     promote();
 
 
-    when(activeServerEntity.invoke(eq(clientDescriptor), any(EntityMessage.class))).thenReturn(new EntityResponse() {});
+    when(activeServerEntity.invokeActive(eq(invokeContext), any(EntityMessage.class))).thenReturn
+      (new
+                                                                                                      EntityResponse() {});
     ServerEntityRequest invokeRequest = mockInvokeRequest();
     invokeOnTransactionHandler(()->managedEntity.addRequestMessage(invokeRequest, mockInvokePayload(), null, response::complete, response::failure));
     response.waitFor();
-    verify(activeServerEntity).invoke(eq(clientDescriptor), any(EntityMessage.class));
+    verify(activeServerEntity).invokeActive(eq(invokeContext), any(EntityMessage.class));
     verify(response).complete(returnValue);
   }
   
@@ -539,7 +541,9 @@ public class ManagedEntityImplTest {
         
     CyclicBarrier barrier = new CyclicBarrier(2);
 
-    when(activeServerEntity.invoke(eq(clientDescriptor), any(EntityMessage.class))).then((InvocationOnMock invocation) -> {
+    when(activeServerEntity.invokeActive(eq(invokeContext), any(EntityMessage.class))).then(
+      (InvocationOnMock
+                                                                                             invocation) -> {
       barrier.await();
       return new EntityResponse() {};
     });
@@ -553,7 +557,7 @@ public class ManagedEntityImplTest {
     fin.waitFor();
     
     verify(loopback, times(1)).completed(Matchers.any(), Matchers.any(FetchID.class), Matchers.any());
-    verify(activeServerEntity, times(2)).invoke(eq(clientDescriptor), any(EntityMessage.class));
+    verify(activeServerEntity, times(2)).invokeActive(eq(invokeContext), any(EntityMessage.class));
     verify(response, times(1)).complete(any());
     verify(fin, times(1)).complete(any());
   }
@@ -680,7 +684,7 @@ public class ManagedEntityImplTest {
   @Test (expected = EntityUserException.class)
   public void testCodecException() throws Exception {
 // this test is no longer relevant, decode is done in the hydrate stage or process/replicated transaction handler
-    throw new EntityUserException(entityID.getClassName(), entityID.getEntityName(), new MessageCodecException("fake", new IOException()));
+    throw new EntityUserException("fake", new MessageCodecException("fake", new IOException()));
   }
 
   @Test
@@ -820,24 +824,32 @@ public class ManagedEntityImplTest {
   private ServerEntityRequest mockCreateEntityRequest() {
     ServerEntityRequest request = mockRequestForAction(ServerEntityAction.CREATE_ENTITY);
     when(request.getNodeID()).thenReturn(nodeID);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
 
   private ServerEntityRequest mockDestroyEntityRequest() {
     ServerEntityRequest request = mockRequestForAction(ServerEntityAction.DESTROY_ENTITY);
     when(request.getNodeID()).thenReturn(nodeID);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
   
   private ServerEntityRequest mockReconfigureEntityRequest() {
     ServerEntityRequest request = mockRequestForAction(ServerEntityAction.RECONFIGURE_ENTITY);
     when(request.getNodeID()).thenReturn(nodeID);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
   
   private ServerEntityRequest mockInvokeRequest() {
     ServerEntityRequest request = mockRequestForAction(ServerEntityAction.INVOKE_ACTION);
     when(request.getNodeID()).thenReturn(nodeID);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
 
@@ -846,6 +858,8 @@ public class ManagedEntityImplTest {
     when(request.getClientInstance()).thenReturn(clientInstanceID);
     when(request.getAction()).thenReturn(ServerEntityAction.INVOKE_ACTION);
     when(request.getNodeID()).thenReturn(nodeID);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
   
@@ -853,6 +867,7 @@ public class ManagedEntityImplTest {
     ServerEntityRequest request = mockRequestForAction(ServerEntityAction.FETCH_ENTITY);
     when(request.getNodeID()).thenReturn(requester.getNodeID());
     when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
 
@@ -860,6 +875,7 @@ public class ManagedEntityImplTest {
     ServerEntityRequest request = mockRequestForAction(ServerEntityAction.RELEASE_ENTITY);
     when(request.getNodeID()).thenReturn(requester.getNodeID());
     when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
     
@@ -867,6 +883,8 @@ public class ManagedEntityImplTest {
     ServerEntityRequest request = mock(ServerEntityRequest.class);
     when(request.getClientInstance()).thenReturn(ClientInstanceID.NULL_ID);
     when(request.getAction()).thenReturn(ServerEntityAction.LOCAL_FLUSH);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
 
@@ -875,6 +893,8 @@ public class ManagedEntityImplTest {
     when(request.getClientInstance()).thenReturn(clientInstanceID);
     when(request.getAction()).thenReturn(action);
     when(request.getNodeID()).thenReturn(nodeID);
+    when(request.getTransaction()).thenReturn(new TransactionID(1));
+    when(request.getOldestTransactionOnClient()).thenReturn(new TransactionID(1));
     return request;
   }
 

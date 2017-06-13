@@ -22,30 +22,21 @@ import com.tc.exception.EntityBusyException;
 import com.tc.exception.EntityReferencedException;
 import com.tc.exception.TCServerRestartException;
 import com.tc.exception.TCShutdownServerException;
+import com.tc.exception.VoltronEntityUserExceptionWrapper;
 import com.tc.exception.VoltronWrapperException;
 import com.tc.l2.msg.SyncReplicationActivity;
 import com.tc.logging.TCLogger;
 import com.tc.logging.TCLogging;
-
-import org.terracotta.entity.ActiveServerEntity;
-import org.terracotta.entity.CommonServerEntity;
-import org.terracotta.entity.EntityMessage;
-import org.terracotta.entity.MessageCodecException;
-import org.terracotta.entity.PassiveServerEntity;
-import org.terracotta.entity.PassiveSynchronizationChannel;
-import org.terracotta.entity.EntityServerService;
-import org.terracotta.entity.StateDumpable;
-import org.terracotta.entity.StateDumper;
-import org.terracotta.entity.SyncMessageCodec;
-
 import com.tc.net.ClientID;
 import com.tc.net.NodeID;
+import com.tc.net.ReconnectionRejectedException;
 import com.tc.object.ClientInstanceID;
 import com.tc.object.EntityDescriptor;
 import com.tc.object.EntityID;
 import com.tc.object.FetchID;
 import com.tc.object.tx.TransactionID;
 import com.tc.objectserver.api.ManagedEntity;
+import com.tc.objectserver.api.ManagementKeyCallback;
 import com.tc.objectserver.api.ServerEntityAction;
 import com.tc.objectserver.api.ServerEntityRequest;
 import com.tc.objectserver.core.api.ITopologyEventCollector;
@@ -55,29 +46,41 @@ import com.tc.properties.TCPropertiesConsts;
 import com.tc.properties.TCPropertiesImpl;
 import com.tc.services.InternalServiceRegistry;
 import com.tc.util.Assert;
+import com.tc.util.concurrent.SetOnceFlag;
+import org.terracotta.entity.ActiveServerEntity;
+import org.terracotta.entity.CommonServerEntity;
+import org.terracotta.entity.ConcurrencyStrategy;
+import org.terracotta.entity.ConfigurationException;
+import org.terracotta.entity.EntityMessage;
+import org.terracotta.entity.EntityResponse;
+import org.terracotta.entity.EntityServerService;
+import org.terracotta.entity.EntityUserException;
+import org.terracotta.entity.ExecutionStrategy;
+import org.terracotta.entity.InvokeContext;
+import org.terracotta.entity.MessageCodec;
+import org.terracotta.entity.MessageCodecException;
+import org.terracotta.entity.PassiveServerEntity;
+import org.terracotta.entity.PassiveSynchronizationChannel;
+import org.terracotta.entity.StateDumper;
+import org.terracotta.entity.SyncMessageCodec;
+import org.terracotta.exception.EntityAlreadyExistsException;
+import org.terracotta.exception.EntityConfigurationException;
+import org.terracotta.exception.EntityException;
+import org.terracotta.exception.EntityNotFoundException;
+import org.terracotta.exception.EntityServerUncaughtException;
+import org.terracotta.exception.PermanentEntityException;
+
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import org.terracotta.entity.ConcurrencyStrategy;
-import org.terracotta.entity.EntityResponse;
-import org.terracotta.entity.MessageCodec;
-import org.terracotta.exception.EntityAlreadyExistsException;
-import org.terracotta.exception.EntityException;
-import org.terracotta.exception.EntityNotFoundException;
-import org.terracotta.exception.EntityUserException;
 import java.util.function.Consumer;
-import java.util.concurrent.TimeUnit;
-import org.terracotta.entity.ConfigurationException;
-import org.terracotta.entity.ExecutionStrategy;
-import org.terracotta.exception.EntityConfigurationException;
-import org.terracotta.exception.PermanentEntityException;
-import com.tc.objectserver.api.ManagementKeyCallback;
-import com.tc.util.concurrent.SetOnceFlag;
+import org.terracotta.exception.EntityServerException;
 
 
 public class ManagedEntityImpl implements ManagedEntity {
@@ -367,22 +370,16 @@ public class ManagedEntityImpl implements ManagedEntity {
 
   @Override
   public void dumpStateTo(StateDumper stateDumper) {
-    if(activeServerEntity != null) {
-      // Entities can optionally implement StateDumpable, so we do a instanceof check before calling dump state method
-      if(activeServerEntity instanceof StateDumpable) {
-        ((StateDumpable) activeServerEntity).dumpStateTo(stateDumper);
-      } else {
-        stateDumper.dumpState(this.getID().toString(), activeServerEntity.toString());
+    try {
+      if(activeServerEntity != null) {
+        activeServerEntity.dumpStateTo(stateDumper);
       }
-    }
 
-    if(passiveServerEntity != null) {
-      // Entities can optionally implement StateDumpable, so we do a instanceof check before calling dump state method
-      if(passiveServerEntity instanceof StateDumpable) {
-        ((StateDumpable) passiveServerEntity).dumpStateTo(stateDumper);
-      } else {
-        stateDumper.dumpState(this.getID().toString(), passiveServerEntity.toString());
+      if(passiveServerEntity != null) {
+        passiveServerEntity.dumpStateTo(stateDumper);
       }
+    } catch (Throwable t) {
+      logger.warn("unable to collect state for " + getID(), t);
     }
   }
 
@@ -390,15 +387,11 @@ public class ManagedEntityImpl implements ManagedEntity {
     public R run() throws MessageCodecException;
   }
   private <R> R runWithHelper(CodecHelper<R> helper) throws EntityUserException {
-    R message = null;
+    R message;
     try {
       message = helper.run();
     } catch (MessageCodecException deserializationException) {
-      throw new EntityUserException(this.getID().getClassName(), this.getID().getEntityName(), deserializationException);
-    } catch (RuntimeException e) {
-      // We first want to wrap this in a codec exception to convey the meaning of where this happened.
-      MessageCodecException deserializationException = new MessageCodecException("Runtime exception in deserializer", e);
-      throw new EntityUserException(this.getID().getClassName(), this.getID().getEntityName(), deserializationException);
+      throw new EntityUserException("caught exception during invoke ", deserializationException);
     }
     return message;
   }
@@ -454,9 +447,9 @@ public class ManagedEntityImpl implements ManagedEntity {
       throw shutdown;
     } catch (Exception e) {
       // Wrap this exception.
-      EntityUserException wrapper = new EntityUserException(id.getClassName(), id.getEntityName(), e);
+      EntityServerUncaughtException wrapper = new EntityServerUncaughtException(this.getID().getClassName(), this.getID().getEntityName(), "caught exception during invoke ", e);
       logger.error("caught exception during invoke ", wrapper);
-      throw new RuntimeException(wrapper);
+      throw wrapper;
     } finally {
       read.unlock();
       if (this.isInActiveState) {
@@ -510,10 +503,8 @@ public class ManagedEntityImpl implements ManagedEntity {
             throw new IllegalArgumentException("Unknown request " + request);
         }
       } catch (Exception e) {
-        // Wrap this exception.
-        EntityUserException wrapper = new EntityUserException(id.getClassName(), id.getEntityName(), e);
-        logger.error("caught exception during invoke ", wrapper);
-        throw new RuntimeException(wrapper);
+        logger.error("caught exception during invoke ", e);
+        throw new RuntimeException(e);
       } finally {
         read.unlock();
       }
@@ -568,7 +559,15 @@ public class ManagedEntityImpl implements ManagedEntity {
   private void receiveSyncEntityPayload(ResultCapture response, MessagePayload message) {
     // This only makes sense if we have a passive instance.
     Assert.assertNotNull(this.passiveServerEntity);
-    this.passiveServerEntity.invoke(message.decodeRawMessage(raw->syncCodec.decode(message.getConcurrency(), raw)));
+    try {
+
+      this.passiveServerEntity.invokePassive(InvokeContextImpl.NULL_CONTEXT,
+                                             message.decodeRawMessage(raw -> syncCodec.decode(message.getConcurrency(),
+                                                                                              raw)));
+    } catch (EntityUserException e) {
+      logger.error("Caught EntityUserException during sync invoke", e);
+      throw new RuntimeException("Caught EntityUserException during sync invoke", e);
+    }
     response.complete();
     // No retire on passive.
     Assert.assertFalse(this.isInActiveState);
@@ -733,6 +732,10 @@ public class ManagedEntityImpl implements ManagedEntity {
   
   private void performAction(ServerEntityRequest wrappedRequest, ResultCapture response, MessagePayload message) {
     Assert.assertNotNull(message);
+    ClientDescriptorImpl clientDescriptor = new ClientDescriptorImpl(wrappedRequest.getNodeID(),
+                                                                     wrappedRequest.getClientInstance());
+    long currentId = wrappedRequest.getTransaction().toLong();
+    long oldestId = wrappedRequest.getOldestTransactionOnClient().toLong();
     EntityMessage em = message.decodeRawMessage(raw->this.codec.decodeMessage(raw));
     if (this.isInActiveState) {
       if (null == this.activeServerEntity) {
@@ -743,22 +746,30 @@ public class ManagedEntityImpl implements ManagedEntity {
           this.retirementManager.registerWithMessage(em, concurrencyKey);
           ExecutionStrategy.Location loc = this.executionStrategy.getExecutionLocation(em);
           if (loc.runOnActive()) {
-            EntityResponse resp = this.activeServerEntity.invoke(new ClientDescriptorImpl(wrappedRequest.getNodeID(), wrappedRequest.getClientInstance()), em);
+            EntityResponse resp = this.activeServerEntity.invokeActive(
+              new InvokeContextImpl(clientDescriptor, currentId, oldestId),
+              em);
             byte[] er = runWithHelper(()->codec.encodeResponse(resp));
             response.complete(er);
           } else {
             response.complete(new byte[0]);
           }
         } catch (EntityUserException e) {
-          response.failure(e);
-          throw new RuntimeException(e);
+          //on Active, log error and send the exception to the client - don't crash server
+          logger.error("Caught EntityUserException during invoke", e);
+          response.failure(new VoltronEntityUserExceptionWrapper(e));
         }
       }
     } else {
       if (null == this.passiveServerEntity) {
         throw new IllegalStateException("Actions on a non-existent entity.");
       } else {
-        this.passiveServerEntity.invoke(em);
+        try {
+          this.passiveServerEntity.invokePassive(new InvokeContextImpl(clientDescriptor, currentId, oldestId), em);
+        } catch (EntityUserException e) {
+          //on passives, just log the exception - don't crash server
+          logger.error("Caught EntityUserException during invoke", e);
+        }
         response.complete();
         // No retire on passive.
         Assert.assertFalse(this.isInActiveState);
@@ -805,7 +816,13 @@ public class ManagedEntityImpl implements ManagedEntity {
         this.activeServerEntity.connected(descriptor);
         if (getEntityRequest.getTransaction().equals(TransactionID.NULL_ID)) {
 //   this is a reconnection, handle the extended reconnect data
-          this.activeServerEntity.handleReconnect(descriptor, extendedData);
+          try {
+            this.activeServerEntity.handleReconnect(descriptor, extendedData);
+          } catch (Exception e) {
+//  something happened during reconnection, force a disconnection, see ProcessTransactionHandler.disconnectClientDueToFailure for handling
+            response.failure(new EntityServerException(this.getID().getClassName(), this.getID().getEntityName(), e.getMessage(), new ReconnectionRejectedException(e)));
+            return;
+          }
         }
       }
       ByteBuffer buffer = ByteBuffer.allocate(this.constructorInfo.length + Long.BYTES);
@@ -823,18 +840,20 @@ public class ManagedEntityImpl implements ManagedEntity {
         clientReferenceCount -= 1;
         Assert.assertTrue(clientReferenceCount >= 0);
       }
-      if (this.isInActiveState) {
-        // The RELEASE can only come directly from a client so we can down-cast.
-        ClientID clientID = (ClientID) request.getNodeID();
 
-        ClientDescriptorImpl clientInstance = new ClientDescriptorImpl(clientID, request.getClientInstance());
+      ClientID clientID = (ClientID) request.getNodeID();
+      ClientDescriptorImpl clientInstance = new ClientDescriptorImpl(clientID, request.getClientInstance());
+
+      if (this.isInActiveState) {
 
         boolean removed = clientEntityStateManager.removeReference(clientInstance);
         Assert.assertTrue(removed);
-        
+
         this.activeServerEntity.disconnected(clientInstance);
         // Fire the event that the client released the entity.
         this.eventCollector.clientDidReleaseEntity(clientID, this.id, request.getClientInstance());
+      } else {
+        this.passiveServerEntity.notifyClientDisconnectedFromActive(clientInstance);
       }
       response.complete();
     }
@@ -1002,7 +1021,7 @@ public class ManagedEntityImpl implements ManagedEntity {
 
     @Override
     public ClientInstanceID getClientInstance() {
-      return null;
+      return ClientInstanceID.NULL_ID;
     }
 
     @Override

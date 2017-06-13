@@ -67,9 +67,12 @@ import com.tc.net.protocol.tcm.TCMessage;
 import com.tc.net.protocol.tcm.TCMessageRouter;
 import com.tc.net.protocol.tcm.TCMessageRouterImpl;
 import com.tc.net.protocol.tcm.TCMessageType;
+import com.tc.net.protocol.transport.DisabledHealthCheckerConfigImpl;
+import com.tc.net.protocol.transport.HealthCheckerConfig;
 import com.tc.net.protocol.transport.HealthCheckerConfigClientImpl;
 import com.tc.net.protocol.transport.NullConnectionPolicy;
 import com.tc.net.protocol.transport.ReconnectionRejectedHandlerL1;
+import com.tc.net.protocol.transport.TransportHandshakeException;
 import com.tc.object.config.ClientConfig;
 import com.tc.object.config.PreparedComponentsFromL2Connection;
 import com.tc.object.context.PauseContext;
@@ -134,7 +137,6 @@ public class DistributedObjectClient implements TCClient {
                                                                                              .getDSOGenericLogger();
   private static final TCLogger                      CONSOLE_LOGGER                      = CustomerLogging
                                                                                              .getConsoleLogger();
-  private static final int                           MAX_CONNECT_TRIES                   = -1;
 
   private static final String                        L1VMShutdownHookName                = "L1 VM Shutdown Hook";
   
@@ -144,7 +146,6 @@ public class DistributedObjectClient implements TCClient {
   private final TCThreadGroup                        threadGroup;
 
   protected final PreparedComponentsFromL2Connection connectionComponents;
-  private final ProductID                            productId;
 
   private ClientMessageChannel                       channel;
   private CommunicationsManager                      communicationsManager;
@@ -159,7 +160,6 @@ public class DistributedObjectClient implements TCClient {
 
   private final String                                 uuid;
   private final String                               name;
-  private final boolean                              diagnostic;
 
   private ClientShutdownManager                      shutdownManager;
 
@@ -176,15 +176,14 @@ public class DistributedObjectClient implements TCClient {
   public DistributedObjectClient(ClientConfig config, TCThreadGroup threadGroup,
                                  PreparedComponentsFromL2Connection connectionComponents,
                                  ClusterInternal cluster) {
-    this(config, new StandardClientBuilder(), threadGroup, connectionComponents, cluster, null,
-        UUID.NULL_ID.toString(), "", null, false);
+    this(config, new StandardClientBuilder(true), threadGroup, connectionComponents, cluster, null,
+        UUID.NULL_ID.toString(), "");
   }
 
   public DistributedObjectClient(ClientConfig config, ClientBuilder builder, TCThreadGroup threadGroup,
                                  PreparedComponentsFromL2Connection connectionComponents,
                                  ClusterInternal cluster, TCSecurityManager securityManager,
-                                 String uuid, String name, ProductID productId,  boolean diagnostic) {
-    this.productId = productId;
+                                 String uuid, String name) {
     Assert.assertNotNull(config);
     this.config = config;
     this.securityManager = securityManager;
@@ -194,7 +193,6 @@ public class DistributedObjectClient implements TCClient {
     this.clientBuilder = builder;
     this.uuid = uuid;
     this.name = name;
-    this.diagnostic = diagnostic;
     this.shutdownAction = new Thread(new ShutdownAction(), L1VMShutdownHookName);
     Runtime.getRuntime().addShutdownHook(this.shutdownAction);
     
@@ -284,6 +282,8 @@ public class DistributedObjectClient implements TCClient {
     this.counterManager = new CounterManagerImpl();
     final MessageMonitor mm = MessageMonitorImpl.createMonitor(tcProperties, DSO_LOGGER);
     final TCMessageRouter messageRouter = new TCMessageRouterImpl();
+    final HealthCheckerConfig hc = new HealthCheckerConfigClientImpl(tcProperties
+                                         .getPropertiesFor(TCPropertiesConsts.L1_L2_HEALTH_CHECK_CATEGORY), "TC Client");
 
     this.communicationsManager = this.clientBuilder
         .createCommunicationsManager(mm,
@@ -291,10 +291,9 @@ public class DistributedObjectClient implements TCClient {
                                      networkStackHarnessFactory,
                                      new NullConnectionPolicy(),
                                      1,
-                                     new HealthCheckerConfigClientImpl(tcProperties
-                                         .getPropertiesFor(TCPropertiesConsts.L1_L2_HEALTH_CHECK_CATEGORY), "DSO Client"),
+                                     hc,
                                      getMessageTypeClassMapping(),
-            ReconnectionRejectedHandlerL1.SINGLETON, securityManager, productId);
+            ReconnectionRejectedHandlerL1.SINGLETON, securityManager);
 
     DSO_LOGGER.debug("Created CommunicationsManager.");
 
@@ -305,8 +304,7 @@ public class DistributedObjectClient implements TCClient {
     if (socketConnectTimeout < 0) { throw new IllegalArgumentException("invalid socket time value: "
                                                                        + socketConnectTimeout); }
     this.channel = this.clientBuilder.createClientMessageChannel(this.communicationsManager,
-                                                                 sessionManager,
-                                                                 MAX_CONNECT_TRIES, socketConnectTimeout, this);
+                                                                 sessionManager, socketConnectTimeout, this);
 
     final ClientIDLoggerProvider cidLoggerProvider = new ClientIDLoggerProvider(this.channel);
     this.communicationStageManager.setLoggerProvider(cidLoggerProvider);
@@ -359,7 +357,7 @@ public class DistributedObjectClient implements TCClient {
                                                                          this.clientHandshakeManager);
     // DO NOT create any stages after this call
     
-    String[] exclusion = (diagnostic) ? 
+    String[] exclusion = this.channel.getProductId() == ProductID.DIAGNOSTIC ? 
     new String[] {
       ClientConfigurationContext.CLUSTER_EVENTS_STAGE,
       ClientConfigurationContext.CLUSTER_MEMBERSHIP_EVENT_STAGE,
@@ -465,6 +463,10 @@ public class DistributedObjectClient implements TCClient {
           DSO_LOGGER.fatal(e.getMessage());
           CONSOLE_LOGGER.fatal(e.getMessage());
           throw new IllegalStateException(e.getMessage(), e);
+        } catch (TransportHandshakeException handshake) {
+          DSO_LOGGER.fatal(handshake.getMessage());
+          CONSOLE_LOGGER.fatal(handshake.getMessage());
+          throw new IllegalStateException(handshake.getMessage(), handshake);
         } catch (final IOException ioe) {
           CONSOLE_LOGGER.warn("IOException connecting to server: " + hostname + ":" + port + ". "
                               + ioe.getMessage());
@@ -480,7 +482,7 @@ public class DistributedObjectClient implements TCClient {
       final TCSocketAddress remoteAddress = this.channel.getRemoteAddress();
       final String infoMsg = "Connection successfully established to server at " + remoteAddress;
       CONSOLE_LOGGER.info(infoMsg);
-      DSO_LOGGER.info(infoMsg);
+//      DSO_LOGGER.info(infoMsg);
     }
   }
 
@@ -614,9 +616,9 @@ public class DistributedObjectClient implements TCClient {
           while (System.currentTimeMillis() < end && t[x].isAlive()) {
             t[x].join(1000);
           }
-          logger.info("Destroyed thread " + t[x].getName() + " time to destroy:" + (System.currentTimeMillis() - start) + " millis");
+          logger.debug("Destroyed thread " + t[x].getName() + " time to destroy:" + (System.currentTimeMillis() - start) + " millis");
         }
-        logger.info("time to destroy thread group:"  + TimeUnit.SECONDS.convert(System.currentTimeMillis() - time, TimeUnit.MILLISECONDS) + " seconds");
+        logger.debug("time to destroy thread group:"  + TimeUnit.SECONDS.convert(System.currentTimeMillis() - time, TimeUnit.MILLISECONDS) + " seconds");
 
         if (this.threadGroup.activeCount() > 0) {
           logger.warn("Timed out waiting for TC thread group threads to die - probable shutdown memory leak\n"
@@ -629,7 +631,7 @@ public class DistributedObjectClient implements TCClient {
           threadGroupCleanerThread.start();
           logger.warn("Spawning TCThreadGroup last chance cleaner thread");
         } else {
-          logger.info("Destroying TC thread group");
+          logger.debug("Destroying TC thread group");
           this.threadGroup.destroy();
         }
       } catch (final Throwable t) {
@@ -730,7 +732,7 @@ public class DistributedObjectClient implements TCClient {
       synchronized (clientStopped) {
         clientStopped.notifyAll();
       }
-      DSO_LOGGER.info("shuting down Terracotta Client hook=" + fromShutdownHook + " force=" + forceImmediate);
+      DSO_LOGGER.info("shutting down Terracotta Client hook=" + fromShutdownHook + " force=" + forceImmediate);
       shutdownClient(fromShutdownHook, forceImmediate);
     } else {
       DSO_LOGGER.info("Client already shutdown.");

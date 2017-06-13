@@ -19,6 +19,7 @@
 package com.tc.objectserver.impl;
 
 import org.terracotta.entity.BasicServiceConfiguration;
+import org.terracotta.entity.ServiceException;
 import org.terracotta.entity.ServiceRegistry;
 
 import com.tc.async.api.ConfigurationContext;
@@ -59,13 +60,10 @@ import org.terracotta.persistence.IPlatformPersistence;
 public class StandardServerBuilder implements ServerBuilder {
   private final HaConfig            haConfig;
 
-  protected final TCSecurityManager securityManager;
   protected final TCLogger          logger;
 
-  public StandardServerBuilder(HaConfig haConfig, TCLogger logger,
-                                  TCSecurityManager securityManager) {
+  public StandardServerBuilder(HaConfig haConfig, TCLogger logger) {
     this.logger = logger;
-    this.securityManager = securityManager;
     this.logger.info("Standard TSA Server created");
     this.haConfig = haConfig;
   }
@@ -73,8 +71,8 @@ public class StandardServerBuilder implements ServerBuilder {
   @Override
   public GroupManager<AbstractGroupMessage> createGroupCommManager(L2ConfigurationSetupManager configManager,
                                              StageManager stageManager, ServerID serverNodeID,
-                                             StripeIDStateManager stripeStateManager, WeightGeneratorFactory weightGeneratorFactory) {
-    return new TCGroupManagerImpl(configManager, stageManager, serverNodeID, this.haConfig.getThisNode(), this.haConfig.getNodesStore(), securityManager, weightGeneratorFactory);
+                                             StripeIDStateManager stripeStateManager, TCSecurityManager mgr, WeightGeneratorFactory weightGeneratorFactory) {
+    return new TCGroupManagerImpl(configManager, stageManager, serverNodeID, this.haConfig.getThisNode(), this.haConfig.getNodesStore(), mgr, weightGeneratorFactory);
   }
 
   @Override
@@ -125,7 +123,12 @@ public class StandardServerBuilder implements ServerBuilder {
 
   @Override
   public Persistor createPersistor(ServiceRegistry serviceRegistry) {
-    IPlatformPersistence platformPersistence = serviceRegistry.getService(new BasicServiceConfiguration<IPlatformPersistence>(IPlatformPersistence.class));
+    IPlatformPersistence platformPersistence = null;
+    try {
+      platformPersistence = serviceRegistry.getService(new BasicServiceConfiguration<IPlatformPersistence>(IPlatformPersistence.class));
+    } catch (ServiceException e) {
+      Assert.fail("Multiple IPlatformPersistence implementations found!");
+    }
     // We can't fail to look this up as the implementation will install an in-memory implementation if an on-disk on
     //  wasn't provided
     Assert.assertNotNull(platformPersistence);
